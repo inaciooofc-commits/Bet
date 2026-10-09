@@ -1,0 +1,34 @@
+PRAGMA foreign_keys=ON;
+CREATE TABLE users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,name TEXT NOT NULL,password TEXT NOT NULL,salt TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'player',balance INTEGER NOT NULL DEFAULT 0 CHECK(balance>=0),created TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE sessions(token TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id),expires INTEGER NOT NULL);
+CREATE TABLE ledger(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id),amount INTEGER NOT NULL,reason TEXT NOT NULL,created TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TRIGGER ledger_apply AFTER INSERT ON ledger BEGIN UPDATE users SET balance=balance+NEW.amount WHERE id=NEW.user_id; END;
+CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT NOT NULL,category TEXT NOT NULL,closes TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',winner TEXT);
+CREATE TABLE outcomes(id TEXT PRIMARY KEY,event_id TEXT REFERENCES events(id),label TEXT NOT NULL,odds INTEGER NOT NULL CHECK(odds BETWEEN 101 AND 10000));
+CREATE TABLE bets(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id),event_id TEXT REFERENCES events(id),outcome_id TEXT REFERENCES outcomes(id),stake INTEGER NOT NULL CHECK(stake BETWEEN 10 AND 100000),odds INTEGER NOT NULL,status TEXT DEFAULT 'pending',created TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(user_id,id));
+CREATE TRIGGER bet_guard BEFORE INSERT ON bets BEGIN
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM events e JOIN outcomes o ON o.event_id=e.id WHERE e.id=NEW.event_id AND o.id=NEW.outcome_id AND o.odds=NEW.odds AND e.status='open' AND julianday(e.closes)>julianday('now')) THEN RAISE(ABORT,'Evento encerrado ou odd alterada') END;
+END;
+CREATE TRIGGER bet_debit AFTER INSERT ON bets BEGIN INSERT INTO ledger VALUES('bet:'||NEW.id,NEW.user_id,-NEW.stake,'Aposta',CURRENT_TIMESTAMP); END;
+CREATE TRIGGER event_settle AFTER UPDATE OF status ON events WHEN OLD.status='open' AND NEW.status IN ('settled','void') BEGIN
+ INSERT INTO ledger SELECT 'settle:'||id,user_id,CASE WHEN NEW.status='void' THEN stake WHEN outcome_id=NEW.winner THEN CAST(stake*odds/100 AS INTEGER) ELSE 0 END,CASE WHEN NEW.status='void' THEN 'Aposta anulada' ELSE 'Resultado de aposta' END,CURRENT_TIMESTAMP FROM bets WHERE event_id=NEW.id AND status='pending';
+ UPDATE bets SET status=CASE WHEN NEW.status='void' THEN 'void' WHEN outcome_id=NEW.winner THEN 'won' ELSE 'lost' END WHERE event_id=NEW.id AND status='pending';
+END;
+CREATE TABLE bonuses(code TEXT PRIMARY KEY,amount INTEGER NOT NULL CHECK(amount>0),max_uses INTEGER NOT NULL CHECK(max_uses>0),starts TEXT NOT NULL,ends TEXT NOT NULL,active INTEGER DEFAULT 1);
+CREATE TABLE claims(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id),code TEXT REFERENCES bonuses(code),UNIQUE(user_id,code));
+CREATE TRIGGER claim_guard BEFORE INSERT ON claims BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM bonuses WHERE code=NEW.code AND active=1 AND julianday(starts)<=julianday('now') AND julianday(ends)>julianday('now') AND (SELECT count(*) FROM claims WHERE code=NEW.code)<max_uses) THEN RAISE(ABORT,'Código indisponível') END; END;
+CREATE TRIGGER claim_credit AFTER INSERT ON claims BEGIN INSERT INTO ledger SELECT 'bonus:'||NEW.id,NEW.user_id,amount,'Código '||code,CURRENT_TIMESTAMP FROM bonuses WHERE code=NEW.code; END;
+CREATE TABLE daily(user_id TEXT REFERENCES users(id),day TEXT,PRIMARY KEY(user_id,day));
+CREATE TRIGGER daily_credit AFTER INSERT ON daily BEGIN INSERT INTO ledger VALUES('daily:'||NEW.user_id||':'||NEW.day,NEW.user_id,100,'Bônus diário',CURRENT_TIMESTAMP); END;
+CREATE TABLE rewards(id TEXT PRIMARY KEY,title TEXT NOT NULL,description TEXT NOT NULL,cost INTEGER CHECK(cost>0),stock INTEGER CHECK(stock>=0),starts TEXT NOT NULL,ends TEXT NOT NULL,active INTEGER DEFAULT 1);
+CREATE TABLE redemptions(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id),reward_id TEXT REFERENCES rewards(id),title TEXT NOT NULL,cost INTEGER NOT NULL,status TEXT DEFAULT 'pending',created TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TRIGGER reward_guard BEFORE INSERT ON redemptions BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM rewards WHERE id=NEW.reward_id AND cost=NEW.cost AND title=NEW.title AND active=1 AND stock>0 AND julianday(starts)<=julianday('now') AND julianday(ends)>julianday('now')) THEN RAISE(ABORT,'Prêmio indisponível') END; END;
+CREATE TRIGGER reward_debit AFTER INSERT ON redemptions BEGIN UPDATE rewards SET stock=stock-1 WHERE id=NEW.reward_id; INSERT INTO ledger VALUES('reward:'||NEW.id,NEW.user_id,-NEW.cost,'Prêmio: '||NEW.title,CURRENT_TIMESTAMP); END;
+CREATE TRIGGER reward_refund AFTER UPDATE OF status ON redemptions WHEN OLD.status='pending' AND NEW.status='cancelled' BEGIN UPDATE rewards SET stock=stock+1 WHERE id=NEW.reward_id; INSERT INTO ledger VALUES('refund:'||NEW.id,NEW.user_id,NEW.cost,'Prêmio cancelado',CURRENT_TIMESTAMP); END;
+CREATE TABLE audit(id TEXT PRIMARY KEY,actor TEXT REFERENCES users(id),action TEXT NOT NULL,detail TEXT NOT NULL,created TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE bootstrap(id INTEGER PRIMARY KEY CHECK(id=1),used INTEGER DEFAULT 0);
+INSERT INTO bootstrap VALUES(1,0);
+CREATE TABLE rate_limits(key TEXT PRIMARY KEY,n INTEGER NOT NULL);
+CREATE INDEX bets_user ON bets(user_id,created);
+CREATE INDEX ledger_user ON ledger(user_id,created);
+CREATE INDEX sessions_expiry ON sessions(expires);

@@ -1,0 +1,1 @@
+{"name":"umbrella-inside-bet","main":"dist/worker.js","compatibility_date":"2026-10-09","compatibility_flags":["nodejs_compat"],"workers_dev":true,"observability":{"enabled":true},"d1_databases":[{"binding":"DB","database_name":"umbrella-inside-bet","migrations_dir":"migrations","database_id":"3c7ccb28-d5cd-4844-b6ed-9f8e9c9c97c9"}]}
