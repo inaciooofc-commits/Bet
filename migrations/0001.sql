@@ -1,0 +1,38 @@
+PRAGMA foreign_keys=ON;
+CREATE TABLE users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,name TEXT NOT NULL,password TEXT NOT NULL,salt TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),balance INTEGER NOT NULL DEFAULT 0 CHECK(balance>=0),created INTEGER NOT NULL);
+CREATE TABLE sessions(token TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),expires INTEGER NOT NULL);
+CREATE TABLE attempts(key TEXT PRIMARY KEY,count INTEGER NOT NULL,expires INTEGER NOT NULL);
+CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT NOT NULL,category TEXT NOT NULL,closes INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','settled','cancelled')),winner TEXT);
+CREATE TABLE outcomes(id TEXT PRIMARY KEY,event_id TEXT NOT NULL REFERENCES events(id),label TEXT NOT NULL,odds INTEGER NOT NULL CHECK(odds BETWEEN 101 AND 10000));
+CREATE TABLE bets(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),outcome_id TEXT NOT NULL REFERENCES outcomes(id),stake INTEGER NOT NULL CHECK(stake BETWEEN 1 AND 100000),odds INTEGER NOT NULL CHECK(odds BETWEEN 101 AND 10000),status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','won','lost','refunded')),payout INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL,UNIQUE(user_id,id));
+CREATE TABLE ledger(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),amount INTEGER NOT NULL,kind TEXT NOT NULL,reference TEXT NOT NULL UNIQUE,created INTEGER NOT NULL);
+CREATE TRIGGER ledger_apply AFTER INSERT ON ledger BEGIN UPDATE users SET balance=balance+NEW.amount WHERE id=NEW.user_id; END;
+CREATE TRIGGER signup AFTER INSERT ON users BEGIN INSERT INTO ledger VALUES(lower(hex(randomblob(16))),NEW.id,1000,'welcome','welcome:'||NEW.id,NEW.created); END;
+CREATE TRIGGER bet_check BEFORE INSERT ON bets BEGIN
+ SELECT RAISE(ABORT,'event_closed') WHERE NOT EXISTS(SELECT 1 FROM outcomes o JOIN events e ON e.id=o.event_id WHERE o.id=NEW.outcome_id AND o.odds=NEW.odds AND e.status='open' AND e.closes>unixepoch());
+ END;
+CREATE TRIGGER bet_debit AFTER INSERT ON bets BEGIN INSERT INTO ledger VALUES(lower(hex(randomblob(16))),NEW.user_id,-NEW.stake,'bet','bet:'||NEW.id,NEW.created); END;
+CREATE TRIGGER settle_once BEFORE UPDATE OF status ON events WHEN OLD.status!='open' BEGIN SELECT RAISE(ABORT,'already_settled'); END;
+CREATE TRIGGER settle_valid BEFORE UPDATE OF status ON events WHEN NEW.status='settled' BEGIN SELECT RAISE(ABORT,'invalid_winner') WHERE NOT EXISTS(SELECT 1 FROM outcomes WHERE id=NEW.winner AND event_id=NEW.id); END;
+CREATE TRIGGER settle AFTER UPDATE OF status ON events WHEN OLD.status='open' AND NEW.status IN ('settled','cancelled') BEGIN
+ INSERT INTO ledger SELECT lower(hex(randomblob(16))),b.user_id,iif(NEW.status='cancelled',b.stake,CAST(b.stake*b.odds/100 AS INTEGER)),'settlement','settlement:'||b.id,unixepoch() FROM bets b JOIN outcomes o ON o.id=b.outcome_id WHERE o.event_id=NEW.id AND b.status='pending' AND (NEW.status='cancelled' OR b.outcome_id=NEW.winner);
+ UPDATE bets SET status=iif(NEW.status='cancelled','refunded',iif(outcome_id=NEW.winner,'won','lost')),payout=iif(NEW.status='cancelled',stake,iif(outcome_id=NEW.winner,CAST(stake*odds/100 AS INTEGER),0)) WHERE status='pending' AND outcome_id IN (SELECT id FROM outcomes WHERE event_id=NEW.id);
+ END;
+CREATE TABLE bonuses(code TEXT PRIMARY KEY,amount INTEGER NOT NULL CHECK(amount BETWEEN 1 AND 100000),starts INTEGER NOT NULL,ends INTEGER NOT NULL CHECK(ends>starts),max_uses INTEGER NOT NULL CHECK(max_uses>0),used INTEGER NOT NULL DEFAULT 0 CHECK(used<=max_uses));
+CREATE TABLE bonus_claims(user_id TEXT REFERENCES users(id),code TEXT REFERENCES bonuses(code),created INTEGER NOT NULL,PRIMARY KEY(user_id,code));
+CREATE TRIGGER bonus_check BEFORE INSERT ON bonus_claims BEGIN SELECT RAISE(ABORT,'bonus_unavailable') WHERE NOT EXISTS(SELECT 1 FROM bonuses WHERE code=NEW.code AND starts<=unixepoch() AND ends>unixepoch() AND used<max_uses); END;
+CREATE TRIGGER bonus_pay AFTER INSERT ON bonus_claims BEGIN UPDATE bonuses SET used=used+1 WHERE code=NEW.code; INSERT INTO ledger SELECT lower(hex(randomblob(16))),NEW.user_id,amount,'bonus','bonus:'||NEW.user_id||':'||NEW.code,NEW.created FROM bonuses WHERE code=NEW.code; END;
+CREATE TABLE daily(user_id TEXT REFERENCES users(id),day TEXT NOT NULL,created INTEGER NOT NULL,PRIMARY KEY(user_id,day));
+CREATE TRIGGER daily_pay AFTER INSERT ON daily BEGIN INSERT INTO ledger VALUES(lower(hex(randomblob(16))),NEW.user_id,100,'daily','daily:'||NEW.user_id||':'||NEW.day,NEW.created); END;
+CREATE TABLE prizes(id TEXT PRIMARY KEY,title TEXT NOT NULL,description TEXT NOT NULL,cost INTEGER NOT NULL CHECK(cost>0),stock INTEGER NOT NULL CHECK(stock>=0),starts INTEGER NOT NULL,ends INTEGER NOT NULL CHECK(ends>starts),active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)));
+CREATE TABLE redemptions(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id),prize_id TEXT REFERENCES prizes(id),cost INTEGER NOT NULL CHECK(cost>0),status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivered','refunded')),created INTEGER NOT NULL);
+CREATE TRIGGER prize_check BEFORE INSERT ON redemptions BEGIN SELECT RAISE(ABORT,'prize_unavailable') WHERE NOT EXISTS(SELECT 1 FROM prizes WHERE id=NEW.prize_id AND active=1 AND stock>0 AND starts<=unixepoch() AND ends>unixepoch() AND cost=NEW.cost); END;
+CREATE TRIGGER prize_debit AFTER INSERT ON redemptions BEGIN UPDATE prizes SET stock=stock-1 WHERE id=NEW.prize_id; INSERT INTO ledger VALUES(lower(hex(randomblob(16))),NEW.user_id,-NEW.cost,'prize','prize:'||NEW.id,NEW.created); END;
+CREATE TRIGGER redemption_once BEFORE UPDATE OF status ON redemptions WHEN OLD.status!='pending' BEGIN SELECT RAISE(ABORT,'already_processed'); END;
+CREATE TRIGGER prize_refund AFTER UPDATE OF status ON redemptions WHEN NEW.status='refunded' AND OLD.status='pending' BEGIN UPDATE prizes SET stock=stock+1 WHERE id=NEW.prize_id; INSERT INTO ledger VALUES(lower(hex(randomblob(16))),NEW.user_id,NEW.cost,'refund','refund:'||NEW.id,unixepoch()); END;
+CREATE TABLE audit(id TEXT PRIMARY KEY,actor TEXT REFERENCES users(id),action TEXT NOT NULL,target TEXT NOT NULL,created INTEGER NOT NULL);
+CREATE INDEX bets_user ON bets(user_id,created);
+CREATE INDEX ledger_user ON ledger(user_id,created);
+CREATE INDEX sessions_expiry ON sessions(expires);
+CREATE INDEX outcomes_event ON outcomes(event_id);
+CREATE INDEX redemption_user ON redemptions(user_id,created);

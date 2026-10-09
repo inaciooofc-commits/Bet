@@ -1,0 +1,26 @@
+{
+  "name": "umbrella-inside-bet",
+  "version": "1.0.0",
+  "description": "Arena de apostas fict\u00edcias do Zarcovi com Ryos",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check src/worker.js && node --check public/app.js",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 migrations apply umbrella-inside-bet-v1 --local",
+    "db:remote": "wrangler d1 migrations apply umbrella-inside-bet-v1 --remote",
+    "types": "wrangler types"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "wrangler": "^4.149.0"
+  },
+  "private": true
+}
